@@ -38,16 +38,10 @@ public static class ImageProcessor
         // endFrame is inclusive, but Parallel.For's upper bound is exclusive
         Parallel.For(startFrame, endFrame + 1, new ParallelOptions { CancellationToken = cts.Token }, i =>
         {
-            // Crops and hashes the current frame
-            Bitmap currentFrame = new(Path.Join(path, $"{i}.jpg"));
-            currentFrame = CropImage(currentFrame, cropPercentage);
-            Digest currentFrameHash = ImagePhash.ComputeDigest(currentFrame.ToLuminanceImage());
+            // Crops and hashes the current frame, then stores the hash at the frame number
+            frameHashes[i] = LoadCroppedPhash(Path.Join(path, $"{i}.jpg"), cropPercentage);
 
-            // Stores the hash at the frame number
-            frameHashes[i] = currentFrameHash;
-
-            // Clears the current frame from memory and notifies the caller of its progress
-            currentFrame.Dispose();
+            // Notifies the caller of its progress
             int done = Interlocked.Increment(ref doneFrames);
             onProgress(done / (double)totalFrames * 100d);
         });
@@ -59,17 +53,9 @@ public static class ImageProcessor
         return new Dictionary<int, Digest>(frameHashes);
     }
 
-    // Compares an entire dictionary against a single image and returns a dictionary of similarity
-    public static Dictionary<int, float[]> GetHashDictSimilarity(Dictionary<int, Digest> hashDict, Bitmap[] references)
+    // Compares an entire dictionary against reference hashes and returns a dictionary of similarity
+    public static Dictionary<int, float[]> GetHashDictSimilarity(Dictionary<int, Digest> hashDict, Digest[] referenceHashes)
     {
-        Digest[] referenceHashes = new Digest[references.Length];
-
-        // Calculated hashes of reference images
-        for (int i = 0; i < references.Length; i++)
-        {
-            referenceHashes[i] = ImagePhash.ComputeDigest(references[i].ToLuminanceImage());
-        }
-
         ConcurrentDictionary<int, float[]> frameSimilarities = new();
 
         // Gets similarity of all frames in parallel
@@ -86,6 +72,23 @@ public static class ImageProcessor
         });
 
         return new Dictionary<int, float[]>(frameSimilarities);
+    }
+
+    // Loads and crops an image from disk, then returns its hash.
+    // The cropped image only lives for the duration of the hashing.
+    public static Digest LoadCroppedPhash(string path, Rectangle cropPercentages)
+    {
+        using Bitmap image = LoadCroppedImage(path, cropPercentages);
+        return ImagePhash.ComputeDigest(image.ToLuminanceImage());
+    }
+
+    // Loads an image from disk and returns a cropped copy of it.
+    // The full size image is disposed right away: GDI+ keeps its pixels in unmanaged memory,
+    // which the garbage collector does not account for, so leaving it to the finalizer leaks.
+    public static Bitmap LoadCroppedImage(string path, Rectangle cropPercentages)
+    {
+        using Bitmap source = new(path);
+        return CropImage(source, cropPercentages);
     }
 
     // Crops an image to by given percentages
