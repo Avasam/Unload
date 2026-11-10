@@ -122,8 +122,10 @@ public partial class MainWindow : Window
     {
         if (pickedLoadingFrames.Count >= 1)
         {
-            Bitmap image = new(Path.Join(project.framesDirectory, $"{pickedLoadingFrames[selectedPickedLoad]}.jpg"));
-            image = ImageProcessor.CropImage(image, GetSliderCropRect());
+            // BitmapToBitmapImage makes a frozen copy, so the bitmap can be disposed right after
+            using Bitmap image = ImageProcessor.LoadCroppedImage(
+                Path.Join(project.framesDirectory, $"{pickedLoadingFrames[selectedPickedLoad]}.jpg"),
+                GetSliderCropRect());
 
             imageLoadFrame.Source = ImageProcessor.BitmapToBitmapImage(image);
         }
