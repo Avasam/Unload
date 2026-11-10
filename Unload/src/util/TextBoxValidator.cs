@@ -1,11 +1,11 @@
 ﻿using System;
 using System.Text.RegularExpressions;
+using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Input;
 
 namespace unload;
 
-public static class TextBoxValidator
+public static partial class TextBoxValidator
 {
     // Ensures a textbox only allows integer inputs
     public static void ClampInteger(TextBox textBox, int minValue, int maxValue, string formatting = "")
@@ -27,17 +27,32 @@ public static class TextBoxValidator
         }
     }
 
-    // When applied to a text box this prevents anything other than a round number to be entered
-    public static void ForceInteger(object sender, TextCompositionEventArgs e)
+    private static readonly Regex nonInteger = NonInteger();
+    private static readonly Regex nonDouble = NonDouble();
+
+    // Prevents anything other than a round number from being typed or pasted in the text box
+    public static void ForceInteger(TextBox textBox) => RejectInput(textBox, nonInteger);
+
+    // Prevents anything other than any number from being typed or pasted in the text box
+    public static void ForceDouble(TextBox textBox) => RejectInput(textBox, nonDouble);
+
+    private static void RejectInput(TextBox textBox, Regex disallowed)
     {
-        Regex regex = new("[^0-9]+");
-        e.Handled = regex.IsMatch(e.Text);
+        textBox.PreviewTextInput += (sender, e) => e.Handled = disallowed.IsMatch(e.Text);
+
+        // Pasting doesn't go through PreviewTextInput
+        DataObject.AddPastingHandler(textBox, (sender, e) =>
+        {
+            if (e.DataObject.GetData(DataFormats.UnicodeText) is not string text || disallowed.IsMatch(text))
+            {
+                e.CancelCommand();
+            }
+        });
     }
 
-    // When applied to a text box this prevents anything other than any number to be entered
-    public static void ForceDouble(object sender, TextCompositionEventArgs e)
-    {
-        Regex regex = new("[^0-9.]+");
-        e.Handled = regex.IsMatch(e.Text);
-    }
+    [GeneratedRegex("[^0-9]")]
+    private static partial Regex NonInteger();
+
+    [GeneratedRegex("[^0-9.]")]
+    private static partial Regex NonDouble();
 }

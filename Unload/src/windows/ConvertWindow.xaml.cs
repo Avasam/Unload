@@ -32,19 +32,19 @@ public partial class ConvertWindow : Window
         InitializeComponent();
 
         // Bind text validation methods to text boxes
-        txtEndTimeH.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtEndTimeM.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtEndTimeS.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtEndTimeMS.PreviewTextInput += TextBoxValidator.ForceInteger;
+        TextBoxValidator.ForceInteger(txtEndTimeH);
+        TextBoxValidator.ForceInteger(txtEndTimeM);
+        TextBoxValidator.ForceInteger(txtEndTimeS);
+        TextBoxValidator.ForceInteger(txtEndTimeMS);
 
-        txtStartTimeH.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtStartTimeM.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtStartTimeS.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtStartTimeMS.PreviewTextInput += TextBoxValidator.ForceInteger;
+        TextBoxValidator.ForceInteger(txtStartTimeH);
+        TextBoxValidator.ForceInteger(txtStartTimeM);
+        TextBoxValidator.ForceInteger(txtStartTimeS);
+        TextBoxValidator.ForceInteger(txtStartTimeMS);
 
-        txtFrameWidth.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtFrameHeight.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtFramesPerSecond.PreviewTextInput += TextBoxValidator.ForceDouble;
+        TextBoxValidator.ForceInteger(txtFrameWidth);
+        TextBoxValidator.ForceInteger(txtFrameHeight);
+        TextBoxValidator.ForceDouble(txtFramesPerSecond);
     }
 
     // Sets default values from video and shows the window

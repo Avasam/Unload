@@ -232,13 +232,13 @@ public partial class MainWindow : Window
 
     private void BindValidationMethods()
     {
-        txtVideoFrame.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtStartFrame.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtEndFrame.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtStepSize.PreviewTextInput += TextBoxValidator.ForceInteger;
+        TextBoxValidator.ForceInteger(txtVideoFrame);
+        TextBoxValidator.ForceInteger(txtStartFrame);
+        TextBoxValidator.ForceInteger(txtEndFrame);
+        TextBoxValidator.ForceInteger(txtStepSize);
 
-        txtFPS.PreviewTextInput += TextBoxValidator.ForceDouble;
-        txtMinSimilarity.PreviewTextInput += TextBoxValidator.ForceDouble;
+        TextBoxValidator.ForceDouble(txtFPS);
+        TextBoxValidator.ForceDouble(txtMinSimilarity);
     }
 
     private void SetProjectState(ProjectState _projectState)

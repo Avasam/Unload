@@ -105,10 +105,10 @@ public partial class LoadCheckWindow : Window, INotifyPropertyChanged
         Width = mainWindow.Width;
         WindowState = mainWindow.WindowState;
 
-        txtLoadNumber.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtStartFrame.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtEndFrame.PreviewTextInput += TextBoxValidator.ForceInteger;
-        txtStepSize.PreviewTextInput += TextBoxValidator.ForceInteger;
+        TextBoxValidator.ForceInteger(txtLoadNumber);
+        TextBoxValidator.ForceInteger(txtStartFrame);
+        TextBoxValidator.ForceInteger(txtEndFrame);
+        TextBoxValidator.ForceInteger(txtStepSize);
 
         UpdateDetectedLoads();
 
