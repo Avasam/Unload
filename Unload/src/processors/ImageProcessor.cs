@@ -36,16 +36,13 @@ public static class ImageProcessor
         // Hashes frames in parallel to the max amount of concurrent tasks the user defined. Holds a cancellation token so it can be stopped
         Parallel.For(startFrame, endFrame, new ParallelOptions { CancellationToken = cts.Token }, i =>
         {
-            // Crops and hashes the current frame
-            Bitmap currentFrame = new(Path.Join(path, $"{i}.jpg"));
-            currentFrame = CropImage(currentFrame, cropPercentage);
-            Digest currentFrameHash = ImagePhash.ComputeDigest(currentFrame.ToLuminanceImage());
+            // Crops and hashes the current frame, then stores the hash at the frame number
+            using (Bitmap currentFrame = LoadCroppedImage(Path.Join(path, $"{i}.jpg"), cropPercentage))
+            {
+                frameHashes[i] = ImagePhash.ComputeDigest(currentFrame.ToLuminanceImage());
+            }
 
-            // Stores the hash at the frame number
-            frameHashes[i] = currentFrameHash;
-
-            // Clears the current frame from memory and notifies the caller of its progress
-            currentFrame.Dispose();
+            // Notifies the caller of its progress
             doneFrames += 1;
             double percentage = doneFrames / (double)endFrame * 100d;
 
@@ -84,6 +81,15 @@ public static class ImageProcessor
         });
 
         return new Dictionary<int, float[]>(frameSimilarities);
+    }
+
+    // Loads an image from disk and returns a cropped copy of it.
+    // The full size image is disposed right away: GDI+ keeps its pixels in unmanaged memory,
+    // which the garbage collector does not account for, so leaving it to the finalizer leaks.
+    public static Bitmap LoadCroppedImage(string path, Rectangle cropPercentages)
+    {
+        using Bitmap source = new(path);
+        return CropImage(source, cropPercentages);
     }
 
     // Crops an image to by given percentages

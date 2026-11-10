@@ -38,11 +38,12 @@ public class Project
     // Returns the similarity of 2 frames ranging from 0 to 1
     public float GetSimilarity(int frame1Index, int frame2Index, Rectangle crop)
     {
-        Bitmap frame1 = new(Path.Join(framesDirectory, $"{frame1Index}.jpg"));
-        Bitmap frame2 = new(Path.Join(framesDirectory, $"{frame2Index}.jpg"));
-
-        frame1 = ImageProcessor.CropImage(frame1, crop);
-        frame2 = ImageProcessor.CropImage(frame2, crop);
+        using Bitmap frame1 = ImageProcessor.LoadCroppedImage(
+            Path.Join(framesDirectory, $"{frame1Index}.jpg"),
+            crop);
+        using Bitmap frame2 = ImageProcessor.LoadCroppedImage(
+            Path.Join(framesDirectory, $"{frame2Index}.jpg"),
+            crop);
 
         return ImageProcessor.CompareBitmapPhash(frame1, frame2);
     }
@@ -72,14 +73,26 @@ public class Project
 
         Bitmap[] loadFrames = new Bitmap[pickedLoadsIndeces.Count];
 
-        for (int i = 0; i < pickedLoadsIndeces.Count; i++)
+        Dictionary<int, float[]> frameSimilarities;
+        try
         {
-            Bitmap loadFrame = new(Path.Join(framesDirectory, $"{pickedLoadsIndeces[i]}.jpg"));
-            loadFrames[i] = ImageProcessor.CropImage(loadFrame, crop);
-        }
+            for (int i = 0; i < pickedLoadsIndeces.Count; i++)
+            {
+                loadFrames[i] = ImageProcessor.LoadCroppedImage(
+                    Path.Join(framesDirectory, $"{pickedLoadsIndeces[i]}.jpg"),
+                    crop);
+            }
 
-        // Store the similarity of all frames and store this in another dictionary
-        Dictionary<int, float[]> frameSimilarities = ImageProcessor.GetHashDictSimilarity(HashedFrames, loadFrames);
+            // Store the similarity of all frames and store this in another dictionary
+            frameSimilarities = ImageProcessor.GetHashDictSimilarity(HashedFrames, loadFrames);
+        }
+        finally
+        {
+            foreach (Bitmap? loadFrame in loadFrames)
+            {
+                loadFrame?.Dispose();
+            }
+        }
 
         int loadScreenCounter = 0;
         int loadFrameCounter = 0;
