@@ -101,11 +101,11 @@ public class Project
         bool subsequentLoadFrame = false;
 
         // Check every frame similarities to the load images against the minimum similarity and list them as loads
-        for (int i = usedStartFrame; i < usedEndFrame; i++)
+        for (int i = usedStartFrame; i <= usedEndFrame; i++)
         {
             for (int j = 0; j < frameSimilarities[i].Length; j++)
             {
-                if (frameSimilarities[i][j] > minSimilarity && i < usedEndFrame)
+                if (frameSimilarities[i][j] > minSimilarity)
                 {
                     loadFrameCounter += 1;
 

@@ -32,9 +32,11 @@ public static class ImageProcessor
         ConcurrentDictionary<int, Digest> frameHashes = new();
 
         int doneFrames = 0;
+        int totalFrames = endFrame - startFrame + 1;
 
         // Hashes frames in parallel to the max amount of concurrent tasks the user defined. Holds a cancellation token so it can be stopped
-        Parallel.For(startFrame, endFrame, new ParallelOptions { CancellationToken = cts.Token }, i =>
+        // endFrame is inclusive, but Parallel.For's upper bound is exclusive
+        Parallel.For(startFrame, endFrame + 1, new ParallelOptions { CancellationToken = cts.Token }, i =>
         {
             // Crops and hashes the current frame, then stores the hash at the frame number
             using (Bitmap currentFrame = LoadCroppedImage(Path.Join(path, $"{i}.jpg"), cropPercentage))
@@ -43,10 +45,8 @@ public static class ImageProcessor
             }
 
             // Notifies the caller of its progress
-            doneFrames += 1;
-            double percentage = doneFrames / (double)endFrame * 100d;
-
-            onProgress(percentage);
+            int done = Interlocked.Increment(ref doneFrames);
+            onProgress(done / (double)totalFrames * 100d);
         });
 
         onFinished();
