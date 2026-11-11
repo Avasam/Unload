@@ -8,21 +8,37 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Media.Imaging;
 using Shipwreck.Phash;
-using Shipwreck.Phash.Bitmaps;
+using Shipwreck.Phash.Imaging;
 
 namespace unload;
 
 public static class ImageProcessor
 {
-    // Hashes bitmap images and returns their similarity using Phash
-    public static float CompareBitmapPhash(Bitmap image1, Bitmap image2)
+    // Crops a frame image and returns its Phash.
+    // Decodes through WicFrame rather than System.Drawing or WPF imaging, which both break under Wine when
+    // frames are hashed in parallel. WicFrame explains why.
+    public static Digest HashFrame(string path, Rectangle cropPercentages)
     {
-        Digest hash1 = ImagePhash.ComputeDigest(image1.ToLuminanceImage());
-        Digest hash2 = ImagePhash.ComputeDigest(image2.ToLuminanceImage());
+        Rectangle crop;
+        byte[] pixels;
+        using (WicFrame frame = new(path))
+        {
+            crop = GetCropPixels(frame.Width, frame.Height, cropPercentages);
+            pixels = frame.CopyPixelsBgr24(crop);
+        }
 
-        float score = ImagePhash.GetCrossCorrelation(hash1, hash2);
+        // Same luminance formula as Shipwreck.Phash.Bitmaps' ToLuminanceImage, so hashes match the
+        // System.Drawing pipeline this replaces. The pixels are in B, G, R order.
+        byte[] luminance = new byte[crop.Width * crop.Height];
+        for (int i = 0, p = 0; i < luminance.Length; i++, p += 3)
+        {
+            int b = pixels[p];
+            int g = pixels[p + 1];
+            int r = pixels[p + 2];
+            luminance[i] = (byte)(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+        }
 
-        return score;
+        return ImagePhash.ComputeDigest(new ByteImage(crop.Width, crop.Height, luminance));
     }
 
     // Applies cropping and hashes all frames in range in a folder and returns the hashes in a dictionary
@@ -37,7 +53,7 @@ public static class ImageProcessor
         Parallel.For(startFrame, endFrame, new ParallelOptions { CancellationToken = cts.Token }, i =>
         {
             // Crops and hashes the current frame, then stores the hash at the frame number
-            frameHashes[i] = LoadCroppedPhash(Path.Join(path, $"{i}.jpg"), cropPercentage);
+            frameHashes[i] = HashFrame(Path.Join(path, $"{i}.jpg"), cropPercentage);
 
             // Notifies the caller of its progress
             doneFrames += 1;
@@ -72,14 +88,6 @@ public static class ImageProcessor
         return new Dictionary<int, float[]>(frameSimilarities);
     }
 
-    // Loads and crops an image from disk, then returns its hash.
-    // The cropped image only lives for the duration of the hashing.
-    public static Digest LoadCroppedPhash(string path, Rectangle cropPercentages)
-    {
-        using Bitmap image = LoadCroppedImage(path, cropPercentages);
-        return ImagePhash.ComputeDigest(image.ToLuminanceImage());
-    }
-
     // Loads an image from disk and returns a cropped copy of it.
     // The full size image is disposed right away: GDI+ keeps its pixels in unmanaged memory,
     // which the garbage collector does not account for, so leaving it to the finalizer leaks.
@@ -90,25 +98,24 @@ public static class ImageProcessor
     }
 
     // Crops an image to by given percentages
-    public static Bitmap CropImage(Image source, Rectangle cropPercentages)
+    public static Bitmap CropImage(Bitmap source, Rectangle cropPercentages)
     {
-        // Converts crop values to pixel sizes in a rectangle
-        Rectangle crop = new()
+        return source.Clone(GetCropPixels(source.Width, source.Height, cropPercentages), PixelFormat.Format24bppRgb);
+    }
+
+    // Converts crop percentages to pixels, kept at least 1 pixel and inside the image
+    private static Rectangle GetCropPixels(int width, int height, Rectangle cropPercentages)
+    {
+        int x = Math.Min((int)Math.Round(cropPercentages.X / 100d * width), width - 1);
+        int y = Math.Min((int)Math.Round(cropPercentages.Y / 100d * height), height - 1);
+
+        return new Rectangle
         {
-            X = (int)Math.Round(cropPercentages.X / 100d * source.Width),
-            Y = (int)Math.Round(cropPercentages.Y / 100d * source.Height),
-            Width = (int)Math.Round(cropPercentages.Width / 100d * source.Width),
-            Height = (int)Math.Round(cropPercentages.Height / 100d * source.Height)
+            X = x,
+            Y = y,
+            Width = Math.Clamp((int)Math.Round(cropPercentages.Width / 100d * width), 1, width - x),
+            Height = Math.Clamp((int)Math.Round(cropPercentages.Height / 100d * height), 1, height - y)
         };
-
-        // Draws old image on a new image cropped to the right size
-        Bitmap bitmap = new(crop.Width, crop.Height);
-        using (Graphics graphics = Graphics.FromImage(bitmap))
-        {
-            graphics.DrawImage(source, new Rectangle(0, 0, bitmap.Width, bitmap.Height), crop, GraphicsUnit.Pixel);
-        }
-
-        return bitmap;
     }
 
     // Converts a bitmap to a bitmap image that can be displayed on the interface
