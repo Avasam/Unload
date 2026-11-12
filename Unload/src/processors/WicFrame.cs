@@ -32,6 +32,7 @@ namespace unload;
 // The vtable slots below follow the interface declarations in wincodec.h, counting IUnknown's
 // QueryInterface (0), AddRef (1) and Release (2) first:
 // https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nn-wincodec-iwicimagingfactory
+// https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nn-wincodec-iwicstream
 // https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nn-wincodec-iwicbitmapdecoder
 // https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nn-wincodec-iwicbitmapsource
 // https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nn-wincodec-iwicformatconverter
@@ -42,14 +43,16 @@ public sealed unsafe class WicFrame : IDisposable
     private static readonly Guid GUID_WICPixelFormat24bppBGR = new("6fddc324-4e03-4bfe-b185-3d77768dc90c");
 
     private const uint CLSCTX_INPROC_SERVER = 0x1;
-    private const uint GENERIC_READ = 0x80000000;
     private const int WICDecodeMetadataCacheOnDemand = 0;
     private const int WICBitmapDitherTypeNone = 0;
     private const int WICBitmapPaletteTypeCustom = 0;
 
     private const int Slot_Release = 2;
-    private const int Slot_Factory_CreateDecoderFromFilename = 3;
+    private const int Slot_Factory_CreateDecoderFromStream = 4;
     private const int Slot_Factory_CreateFormatConverter = 10;
+    private const int Slot_Factory_CreateStream = 14;
+    // IWICStream extends IStream, which extends ISequentialStream
+    private const int Slot_Stream_InitializeFromMemory = 16;
     private const int Slot_Decoder_GetFrame = 13;
     private const int Slot_Source_GetSize = 3;
     private const int Slot_Source_GetPixelFormat = 4;
@@ -61,6 +64,9 @@ public sealed unsafe class WicFrame : IDisposable
     [ThreadStatic]
     private static IntPtr threadFactory;
 
+    // The encoded image stays pinned while WIC reads it, which is as long as the decoder lives
+    private GCHandle pinnedImage;
+    private IntPtr stream;
     private IntPtr decoder;
     private IntPtr frame;
     private IntPtr converter;
@@ -70,19 +76,25 @@ public sealed unsafe class WicFrame : IDisposable
     public int Width { get; }
     public int Height { get; }
 
-    // Decodes the first frame of an image file
-    public WicFrame(string path)
+    // Decodes the first frame of an encoded image in memory
+    public WicFrame(byte[] image)
     {
         try
         {
+            pinnedImage = GCHandle.Alloc(image, GCHandleType.Pinned);
             IntPtr factory = GetThreadFactory();
-            fixed (char* fileName = path)
-            {
-                IntPtr newDecoder;
-                Check(((delegate* unmanaged[Stdcall]<IntPtr, char*, Guid*, uint, int, IntPtr*, int>)Slot(factory, Slot_Factory_CreateDecoderFromFilename))(
-                    factory, fileName, null, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &newDecoder));
-                decoder = newDecoder;
-            }
+
+            IntPtr newStream;
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, IntPtr*, int>)Slot(factory, Slot_Factory_CreateStream))(factory, &newStream));
+            stream = newStream;
+
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, byte*, uint, int>)Slot(stream, Slot_Stream_InitializeFromMemory))(
+                stream, (byte*)pinnedImage.AddrOfPinnedObject(), (uint)image.Length));
+
+            IntPtr newDecoder;
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, Guid*, int, IntPtr*, int>)Slot(factory, Slot_Factory_CreateDecoderFromStream))(
+                factory, stream, null, WICDecodeMetadataCacheOnDemand, &newDecoder));
+            decoder = newDecoder;
 
             IntPtr newFrame;
             Check(((delegate* unmanaged[Stdcall]<IntPtr, uint, IntPtr*, int>)Slot(decoder, Slot_Decoder_GetFrame))(decoder, 0, &newFrame));
@@ -142,6 +154,12 @@ public sealed unsafe class WicFrame : IDisposable
         Release(ref converter);
         Release(ref frame);
         Release(ref decoder);
+        Release(ref stream);
+
+        if (pinnedImage.IsAllocated)
+        {
+            pinnedImage.Free();
+        }
     }
 
     private static IntPtr GetThreadFactory()
