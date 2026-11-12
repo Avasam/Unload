@@ -185,20 +185,6 @@ public partial class ConvertWindow : Window
             return;
         }
 
-        // Check if _frames directory exists, otherwise create it
-        if (Directory.Exists(targetDirectory))
-        {
-            Directory.Delete(targetDirectory, true);
-        }
-
-        Directory.CreateDirectory(targetDirectory);
-
-        ConversionInfo info = new(Path.GetFileName(filePath), fps, expectedFrames);
-
-        // Save user conversion string into a file in json format
-        string jsonString = JsonSerializer.Serialize(info);
-        File.WriteAllText(Path.Join(targetDirectory, "conversion-info.json"), jsonString);
-
         // Show a progress window and hide this window
         ProgressWindow progress = new("Converting video to images", startWindow);
 
@@ -211,8 +197,26 @@ public partial class ConvertWindow : Window
         {
             try
             {
+                // Off the UI thread: a frames folder from older versions of Unload holds a file per frame,
+                // and deleting 100k+ files takes seconds (about 12 seconds for 132k under Wine)
+                if (Directory.Exists(targetDirectory))
+                {
+                    Directory.Delete(targetDirectory, true);
+                }
+
+                Directory.CreateDirectory(targetDirectory);
+
+                ConversionInfo info = new(Path.GetFileName(filePath), fps, expectedFrames);
+
+                // Save user conversion string into a file in json format
+                string jsonString = JsonSerializer.Serialize(info);
+                File.WriteAllText(Path.Join(targetDirectory, "conversion-info.json"), jsonString);
+
                 await VideoProcessor.ConvertToImageSequence(filePath, targetDirectory, startTime, endTime, width,
                     height, fps, progress.cts, onProgress);
+
+                // Indexes while the frames are likely still in the disk cache, opening the project then reads the index
+                FrameStore.WriteIndex(targetDirectory);
             }
             catch (OperationCanceledException)
             {

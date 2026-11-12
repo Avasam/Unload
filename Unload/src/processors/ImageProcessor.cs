@@ -17,11 +17,11 @@ public static class ImageProcessor
     // Crops a frame image and returns its Phash.
     // Decodes through WicFrame rather than System.Drawing or WPF imaging, which both break under Wine when
     // frames are hashed in parallel. WicFrame explains why.
-    public static Digest HashFrame(string path, Rectangle cropPercentages)
+    public static Digest HashFrame(byte[] image, Rectangle cropPercentages)
     {
         Rectangle crop;
         byte[] pixels;
-        using (WicFrame frame = new(path))
+        using (WicFrame frame = new(image))
         {
             crop = GetCropPixels(frame.Width, frame.Height, cropPercentages);
             pixels = frame.CopyPixelsBgr24(crop);
@@ -41,8 +41,8 @@ public static class ImageProcessor
         return ImagePhash.ComputeDigest(new ByteImage(crop.Width, crop.Height, luminance));
     }
 
-    // Applies cropping and hashes all frames in range in a folder and returns the hashes in a dictionary
-    public static Dictionary<int, Digest> CropAndPhashFolder(string? path, Rectangle cropPercentage, int startFrame, int endFrame,
+    // Applies cropping and hashes all frames in range and returns the hashes in a dictionary
+    public static Dictionary<int, Digest> CropAndPhashFrames(FrameStore frames, Rectangle cropPercentage, int startFrame, int endFrame,
         CancellationTokenSource cts, Action<double> onProgress, Action onFinished)
     {
         ConcurrentDictionary<int, Digest> frameHashes = new();
@@ -55,7 +55,7 @@ public static class ImageProcessor
         Parallel.For(startFrame, endFrame + 1, new ParallelOptions { CancellationToken = cts.Token }, i =>
         {
             // Crops and hashes the current frame, then stores the hash at the frame number
-            frameHashes[i] = HashFrame(Path.Join(path, $"{i}.jpg"), cropPercentage);
+            frameHashes[i] = HashFrame(frames.ReadFrame(i), cropPercentage);
 
             // Notifies the caller of its progress
             int done = Interlocked.Increment(ref doneFrames);
@@ -88,12 +88,14 @@ public static class ImageProcessor
         return new Dictionary<int, float[]>(frameSimilarities);
     }
 
-    // Loads an image from disk and returns a cropped copy of it.
+    // Decodes an encoded image and returns a cropped copy of it.
     // The full size image is disposed right away: GDI+ keeps its pixels in unmanaged memory,
     // which the garbage collector does not account for, so leaving it to the finalizer leaks.
-    public static Bitmap LoadCroppedImage(string path, Rectangle cropPercentages)
+    public static Bitmap LoadCroppedImage(byte[] image, Rectangle cropPercentages)
     {
-        using Bitmap source = new(path);
+        // GDI+ reads from the stream for as long as the bitmap lives, the cropped copy doesn't need it
+        using MemoryStream stream = new(image);
+        using Bitmap source = new(stream);
         return CropImage(source, cropPercentages);
     }
 
@@ -126,10 +128,23 @@ public static class ImageProcessor
         bitmap.Save(memory, ImageFormat.Png);
         memory.Position = 0;
 
+        return LoadBitmapImage(memory);
+    }
+
+    // Decodes an encoded image into a bitmap image that can be displayed on the interface
+    public static BitmapImage LoadBitmapImage(byte[] image)
+    {
+        using MemoryStream memory = new(image);
+        return LoadBitmapImage(memory);
+    }
+
+    private static BitmapImage LoadBitmapImage(Stream stream)
+    {
         BitmapImage bitmapImage = new();
         bitmapImage.BeginInit();
 
-        bitmapImage.StreamSource = memory;
+        // OnLoad decodes during EndInit, so the stream can be disposed right after
+        bitmapImage.StreamSource = stream;
         bitmapImage.CacheOption = BitmapCacheOption.OnLoad;
 
         bitmapImage.EndInit();

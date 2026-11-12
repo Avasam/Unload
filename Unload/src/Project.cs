@@ -8,9 +8,10 @@ using Shipwreck.Phash;
 
 namespace unload;
 
-public class Project
+public sealed class Project : IDisposable
 {
     public readonly string framesDirectory;
+    public readonly FrameStore frames;
     public readonly string videoName;
 
     public readonly int totalFrames;
@@ -24,11 +25,15 @@ public class Project
     private double usedMinSimilarity;
     private int usedMinLoadFrames;
 
-    public Project(string _framesDirectory, string _videoName, int _totalFrames, double _fps)
+    // Opens the frames in the frames directory, they stay open until the project is disposed.
+    // `onIndexing` and `cancellationToken` apply when the frames have to be indexed first, see FrameStore.Open.
+    public Project(string _framesDirectory, string _videoName, double _fps, Action<double>? onIndexing = null,
+        CancellationToken cancellationToken = default)
     {
         framesDirectory = _framesDirectory;
+        frames = FrameStore.Open(_framesDirectory, onIndexing, cancellationToken);
         videoName = _videoName;
-        totalFrames = _totalFrames;
+        totalFrames = frames.FrameCount;
         fps = _fps;
 
         HashedFrames = new();
@@ -38,8 +43,8 @@ public class Project
     // Returns the similarity of 2 frames ranging from 0 to 1
     public float GetSimilarity(int frame1Index, int frame2Index, Rectangle crop)
     {
-        Digest hash1 = ImageProcessor.HashFrame(Path.Join(framesDirectory, $"{frame1Index}.jpg"), crop);
-        Digest hash2 = ImageProcessor.HashFrame(Path.Join(framesDirectory, $"{frame2Index}.jpg"), crop);
+        Digest hash1 = ImageProcessor.HashFrame(frames.ReadFrame(frame1Index), crop);
+        Digest hash2 = ImageProcessor.HashFrame(frames.ReadFrame(frame2Index), crop);
 
         return ImagePhash.GetCrossCorrelation(hash1, hash2);
     }
@@ -48,7 +53,7 @@ public class Project
     public void PrepareFrames(int startFrame, int endFrame, Rectangle crop,
         CancellationTokenSource cts, Action<double> onProgress, Action onFinished)
     {
-        HashedFrames = ImageProcessor.CropAndPhashFolder(framesDirectory, crop, startFrame,
+        HashedFrames = ImageProcessor.CropAndPhashFrames(frames, crop, startFrame,
              endFrame, cts, onProgress, onFinished);
 
         usedStartFrame = startFrame;
@@ -68,7 +73,7 @@ public class Project
         DetectedLoads.Clear();
 
         Digest[] loadHashes = pickedLoadsIndeces
-            .Select(index => ImageProcessor.HashFrame(Path.Join(framesDirectory, $"{index}.jpg"), crop))
+            .Select(index => ImageProcessor.HashFrame(frames.ReadFrame(index), crop))
             .ToArray();
 
         // Store the similarity of all frames and store this in another dictionary
@@ -190,5 +195,10 @@ public class Project
         lines.Add($"End frame,{usedEndFrame}");
 
         File.WriteAllLinesAsync(path, lines);
+    }
+
+    public void Dispose()
+    {
+        frames.Dispose();
     }
 }
