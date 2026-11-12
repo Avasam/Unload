@@ -33,7 +33,8 @@ public static class VideoProcessor
 #endif
     }
 
-    // Outputs a video file as images of every individual frame in the specified directory
+    // Outputs every frame of a video file as JPEG images, all in one MJPEG file in the specified directory.
+    // FrameStore explains why the frames aren't in a file each.
     public static async Task<IConversionResult> ConvertToImageSequence(string inputPath, string outputPath, TimeSpan startTime,
         TimeSpan endTime, int frameWidth, int frameHeight, double fps, CancellationTokenSource cts, Action<double> onProgress)
     {
@@ -52,7 +53,8 @@ public static class VideoProcessor
             .AddParameter($"-t {duration}")
             .AddParameter($"-vf fps={fps},scale={frameWidth}:{frameHeight}")
             .AddParameter("-q:v 3")
-            .SetOutput(Path.Join(outputPath, "%d.jpg"));
+            .AddParameter("-f mjpeg")
+            .SetOutput(Path.Join(outputPath, FrameStore.FRAMES_FILE_NAME));
 
         // Notifies the calling location on the progress of converting
         conversion.OnProgress += (sender, args) =>

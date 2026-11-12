@@ -9,7 +9,6 @@ using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 using unload.Properties;
 using Point = System.Windows.Point;
@@ -38,6 +37,10 @@ public partial class MainWindow : Window
 
     private bool hasExported;
     private bool shouldOpenStart;
+
+    // Frame preparation reads the project's frames, so closing waits for it before disposing them
+    private Thread? prepareFramesThread;
+    private CancellationTokenSource? prepareFramesCts;
 
     private bool drawingLoadCrop;
     private Point loadCropStartPoint;
@@ -112,8 +115,7 @@ public partial class MainWindow : Window
         txtVideoFrame.Text = frameIndex.ToString();
 
         // Set the video frame and update the interface
-        Uri image = new(Path.Join(project.framesDirectory, $"{frameIndex}.jpg"));
-        imageVideo.Source = new BitmapImage(image);
+        imageVideo.Source = ImageProcessor.LoadBitmapImage(project.frames.ReadFrame(frameIndex));
 
         txtVideoFrame.Text = frameIndex.ToString();
     }
@@ -124,7 +126,7 @@ public partial class MainWindow : Window
         {
             // BitmapToBitmapImage makes a frozen copy, so the bitmap can be disposed right after
             using Bitmap image = ImageProcessor.LoadCroppedImage(
-                Path.Join(project.framesDirectory, $"{pickedLoadingFrames[selectedPickedLoad]}.jpg"),
+                project.frames.ReadFrame(pickedLoadingFrames[selectedPickedLoad]),
                 GetSliderCropRect());
 
             imageLoadFrame.Source = ImageProcessor.BitmapToBitmapImage(image);
@@ -492,9 +494,10 @@ public partial class MainWindow : Window
 
         void onProgress(double percentage) => progress.percentage = percentage;
 
+        // BeginInvoke, as closing the window blocks the UI thread until this thread ends
         void onFinished()
         {
-            Dispatcher.Invoke(() =>
+            Dispatcher.BeginInvoke(() =>
             {
                 progress.Close();
                 gridContainer.IsEnabled = true;
@@ -504,9 +507,29 @@ public partial class MainWindow : Window
 
         Thread thread = new(() =>
         {
-            project.PrepareFrames(startFrame, endFrame, crop,
-                progress.cts, onProgress, onFinished);
+            try
+            {
+                project.PrepareFrames(startFrame, endFrame, crop,
+                    progress.cts, onProgress, onFinished);
+            }
+            catch (OperationCanceledException)
+            {
+                // The progress window closes itself when cancelled
+                Dispatcher.BeginInvoke(() => gridContainer.IsEnabled = true);
+            }
+            finally
+            {
+                // On the UI thread, so OnClosed can't cancel it while it is being disposed
+                Dispatcher.BeginInvoke(() =>
+                {
+                    if (prepareFramesCts == progress.cts) prepareFramesCts = null;
+                    progress.cts.Dispose();
+                });
+            }
         });
+
+        prepareFramesThread = thread;
+        prepareFramesCts = progress.cts;
 
         thread.IsBackground = true;
         thread.Start();
@@ -697,5 +720,16 @@ public partial class MainWindow : Window
             StartWindow startWindow = new();
             startWindow.Show();
         }
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        prepareFramesCts?.Cancel();
+        prepareFramesThread?.Join();
+        // Still set when the thread's dispose hasn't run yet, disposing twice is harmless
+        prepareFramesCts?.Dispose();
+        project.Dispose();
+
+        base.OnClosed(e);
     }
 }

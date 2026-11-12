@@ -8,6 +8,7 @@ using System.Reflection;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -73,7 +74,9 @@ public partial class StartWindow : Window
         if (workingDirectory.Length == 0) workingDirectory = null;
     }
 
-    public void LoadProject(string framesDirectory)
+    private const string ISSUES_URL = "https://github.com/milankarman/Unload/issues";
+
+    public async Task LoadProject(string framesDirectory)
     {
         string infoPath = Path.Join(framesDirectory, "conversion-info.json");
 
@@ -106,48 +109,115 @@ public partial class StartWindow : Window
             return;
         }
 
+        // Frames folders from before FrameStore hold a JPEG file per frame, which isn't read anymore
+        if (!File.Exists(Path.Join(framesDirectory, FrameStore.FRAMES_FILE_NAME)))
+        {
+            string message = $"Couldn't find \"{FrameStore.FRAMES_FILE_NAME}\" in frames folder. " +
+                "Frames converted by older versions of Unload are stored differently. Please convert the video again.";
+            MessageBox.Show(message, "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+
+            return;
+        }
+
         string fileName = info.FileName;
         double fps = info.FPS;
-        int totalFrames = info.ExpectedFrames;
 
-        // Check if the same amount of converted images are found as the video has frames s(1 missing or 1 extra seems normal)
-        if (!File.Exists(Path.Join(framesDirectory, (totalFrames - 1).ToString() + ".jpg")))
+        // Indexing reads every frame, which takes a while for a long video on a hard drive. Opening indexed frames is
+        // instant, so the progress window only shows for indexing.
+        ProgressWindow? progress = FrameStore.HasIndex(framesDirectory) ? null : new("Indexing frames", this);
+        Action<double>? onIndexing = progress == null ? null : percentage => progress.percentage = percentage;
+        CancellationToken cancellationToken = progress?.cts.Token ?? CancellationToken.None;
+
+        Project? project = null;
+        try
         {
-            string message = "Warning, fewer converted frames are found than expected. This could mean that the video has dropped frames.";
-            MessageBox.Show(message, "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+            progress?.Show();
+            gridContainer.IsEnabled = false;
+
+            try
+            {
+                project = await Task.Run(() => new Project(framesDirectory, fileName ?? "Unkown", fps, onIndexing, cancellationToken));
+            }
+            catch (OperationCanceledException)
+            {
+                // The progress window closes itself when cancelled
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                MessageBox.Show($"Couldn't read the converted frames: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+
+                return;
+            }
+            finally
+            {
+                gridContainer.IsEnabled = true;
+                progress?.Close();
+                progress?.cts.Dispose();
+            }
+
+            // A conversion that failed or was stopped before its first frame leaves no frames to show
+            if (project.totalFrames == 0)
+            {
+                string message = "No converted frames were found in the frames folder. Please convert the video again.";
+                MessageBox.Show(message, "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+
+                return;
+            }
+
+            // Check if the same amount of converted images are found as the video has frames (1 missing or 1 extra seems normal)
+            if (project.totalFrames < info.ExpectedFrames - 1)
+            {
+                string message = "Warning, fewer converted frames are found than expected. This could mean that the video has dropped frames. " +
+                    "The converted frames could also be damaged, which converting the video again would fix.";
+                MessageBox.Show(message, "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+
+            // The frames still open without the index, but indexing them on every open is slow and shouldn't happen
+            if (project.frames.IndexError != null)
+            {
+                string message = $"Couldn't read or save the frames index \"{FrameStore.INDEX_FILE_NAME}\": {project.frames.IndexError.Message}" +
+                    Environment.NewLine + Environment.NewLine +
+                    "The frames were indexed again, which makes opening this video slower. " +
+                    $"If this keeps happening, please report it at {ISSUES_URL}";
+                MessageBox.Show(message, "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+
+            if (fileName != null)
+            {
+                // Add to previously opened videos then sort and save them
+                PreviousVideo? existing = previousVideos.FirstOrDefault(i => i.FileName == fileName);
+
+                if (existing != null)
+                {
+                    existing.LastOpened = DateTime.Now;
+                }
+                else
+                {
+                    PreviousVideo previousVideo = new(fileName, framesDirectory, DateTime.Now);
+                    previousVideos.Add(previousVideo);
+                }
+
+                previousVideos = new(previousVideos.OrderByDescending(i => i.LastOpened).Take(5).ToList());
+
+                SavePreviousVideos();
+            }
+
+            // Start the main window, which disposes the project when closed
+            MainWindow mainWindow = new(project);
+            project = null;
+
+            mainWindow.Show();
+            Close();
         }
-
-        totalFrames = Directory.GetFiles(framesDirectory, "*.jpg").Length;
-
-        if (fileName != null)
+        finally
         {
-            // Add to previously opened videos then sort and save them
-            PreviousVideo? existing = previousVideos.FirstOrDefault(i => i.FileName == fileName);
-
-            if (existing != null)
-            {
-                existing.LastOpened = DateTime.Now;
-            }
-            else
-            {
-                PreviousVideo previousVideo = new(fileName, framesDirectory, DateTime.Now);
-                previousVideos.Add(previousVideo);
-            }
-
-            previousVideos = new(previousVideos.OrderByDescending(i => i.LastOpened).Take(5).ToList());
-
-            SavePreviousVideos();
+            // Only still set when something failed before the main window took ownership of the project
+            project?.Dispose();
         }
-
-        // Create the project and start the main window
-        Project project = new(framesDirectory, fileName ?? "Unkown", totalFrames, fps);
-
-        MainWindow mainWindow = new(project);
-        mainWindow.Show();
-        Close();
     }
 
-    private void btnLoad_Click(object sender, RoutedEventArgs e)
+    private async void btnLoad_Click(object sender, RoutedEventArgs e)
     {
         OpenFileDialog dialog = new();
         dialog.Filter = "Unload Supported Formats|*.3g2;*.3gp;*.3gp2;*.asf;*.avi;*.dvrms;*.flv;*.h261;*.h263;*.h264;*.m2t;" +
@@ -178,7 +248,7 @@ public partial class StartWindow : Window
                 return;
             }
 
-            LoadProject(framesDirectory);
+            await LoadProject(framesDirectory);
         }
     }
 
@@ -201,10 +271,10 @@ public partial class StartWindow : Window
                 Directory.CreateDirectory(framesDirectory);
             }
 
-            void onFinished()
+            async void onFinished()
             {
                 gridContainer.IsEnabled = true;
-                LoadProject(framesDirectory);
+                await LoadProject(framesDirectory);
             }
 
             gridContainer.IsEnabled = false;
@@ -220,7 +290,7 @@ public partial class StartWindow : Window
         gridContainer.IsEnabled = false;
     }
 
-    private void btnPreviousVideoLoad_Click(object sender, RoutedEventArgs e)
+    private async void btnPreviousVideoLoad_Click(object sender, RoutedEventArgs e)
     {
         Button cmd = (Button)sender;
         if (cmd.DataContext is PreviousVideo previousVideo)
@@ -236,7 +306,7 @@ public partial class StartWindow : Window
                 return;
             }
 
-            LoadProject(previousVideo.FramesDirectory);
+            await LoadProject(previousVideo.FramesDirectory);
         }
     }
 
@@ -292,6 +362,10 @@ public partial class StartWindow : Window
     // Only deletes what a conversion writes, so a folder the user picked by its conversion-info.json keeps their other files
     private static void DeleteFramesDirectory(string framesDirectory)
     {
+        File.Delete(Path.Join(framesDirectory, FrameStore.FRAMES_FILE_NAME));
+        File.Delete(Path.Join(framesDirectory, FrameStore.INDEX_FILE_NAME));
+
+        // Frames folders from before FrameStore hold a JPEG file per frame, deleting them still frees that space
         IEnumerable<string> frames = Directory.EnumerateFiles(framesDirectory, "*.jpg")
             .Where(frame => FrameFileName().IsMatch(Path.GetFileNameWithoutExtension(frame)));
 

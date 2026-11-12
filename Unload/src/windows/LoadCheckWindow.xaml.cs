@@ -2,11 +2,9 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.IO;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Media.Imaging;
 using unload.Properties;
 
 namespace unload;
@@ -127,14 +125,11 @@ public partial class LoadCheckWindow : Window, INotifyPropertyChanged
 
     private void ShowStartFrame(int frameIndex)
     {
-        Uri startFrame = new(Path.Join(project.framesDirectory, $"{frameIndex}.jpg"));
-        imgStartFrame.Source = new BitmapImage(startFrame);
-
-        Uri startFrameBefore = new(Path.Join(project.framesDirectory, $"{frameIndex - 1}.jpg"));
+        imgStartFrame.Source = ImageProcessor.LoadBitmapImage(project.frames.ReadFrame(frameIndex));
 
         if (frameIndex > 1)
         {
-            imgStartFrameBefore.Source = new BitmapImage(startFrameBefore);
+            imgStartFrameBefore.Source = ImageProcessor.LoadBitmapImage(project.frames.ReadFrame(frameIndex - 1));
         }
         else
         {
@@ -144,14 +139,11 @@ public partial class LoadCheckWindow : Window, INotifyPropertyChanged
 
     private void ShowEndFrame(int frameIndex)
     {
-        Uri endFrame = new(Path.Join(project.framesDirectory, $"{frameIndex}.jpg"));
-        imgEndFrame.Source = new BitmapImage(endFrame);
-
-        Uri endFrameAfter = new(Path.Join(project.framesDirectory, $"{frameIndex + 1}.jpg"));
+        imgEndFrame.Source = ImageProcessor.LoadBitmapImage(project.frames.ReadFrame(frameIndex));
 
         if (frameIndex < project.totalFrames)
         {
-            imgEndFrameAfter.Source = new BitmapImage(endFrameAfter);
+            imgEndFrameAfter.Source = ImageProcessor.LoadBitmapImage(project.frames.ReadFrame(frameIndex + 1));
         }
         else
         {
