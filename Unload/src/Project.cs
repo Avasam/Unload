@@ -38,14 +38,10 @@ public class Project
     // Returns the similarity of 2 frames ranging from 0 to 1
     public float GetSimilarity(int frame1Index, int frame2Index, Rectangle crop)
     {
-        using Bitmap frame1 = ImageProcessor.LoadCroppedImage(
-            Path.Join(framesDirectory, $"{frame1Index}.jpg"),
-            crop);
-        using Bitmap frame2 = ImageProcessor.LoadCroppedImage(
-            Path.Join(framesDirectory, $"{frame2Index}.jpg"),
-            crop);
+        Digest hash1 = ImageProcessor.HashFrame(Path.Join(framesDirectory, $"{frame1Index}.jpg"), crop);
+        Digest hash2 = ImageProcessor.HashFrame(Path.Join(framesDirectory, $"{frame2Index}.jpg"), crop);
 
-        return ImageProcessor.CompareBitmapPhash(frame1, frame2);
+        return ImagePhash.GetCrossCorrelation(hash1, hash2);
     }
 
     // Crops and hashes every video frame in the selected range and stores it for later comparisons
@@ -71,13 +67,9 @@ public class Project
     {
         DetectedLoads.Clear();
 
-        Digest[] loadHashes = new Digest[pickedLoadsIndeces.Count];
-        for (int i = 0; i < pickedLoadsIndeces.Count; i++)
-        {
-            loadHashes[i] = ImageProcessor.LoadCroppedPhash(
-                Path.Join(framesDirectory, $"{pickedLoadsIndeces[i]}.jpg"),
-                crop);
-        }
+        Digest[] loadHashes = pickedLoadsIndeces
+            .Select(index => ImageProcessor.HashFrame(Path.Join(framesDirectory, $"{index}.jpg"), crop))
+            .ToArray();
 
         // Store the similarity of all frames and store this in another dictionary
         Dictionary<int, float[]> frameSimilarities = ImageProcessor.GetHashDictSimilarity(HashedFrames, loadHashes);
