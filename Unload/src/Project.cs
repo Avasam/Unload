@@ -43,8 +43,8 @@ public sealed class Project : IDisposable
     // Returns the similarity of 2 frames ranging from 0 to 1
     public float GetSimilarity(int frame1Index, int frame2Index, Rectangle crop)
     {
-        Digest hash1 = ImageProcessor.HashFrame(frames.ReadFrame(frame1Index), crop);
-        Digest hash2 = ImageProcessor.HashFrame(frames.ReadFrame(frame2Index), crop);
+        Digest hash1 = ImageProcessor.HashFrame(frames, frame1Index, crop);
+        Digest hash2 = ImageProcessor.HashFrame(frames, frame2Index, crop);
 
         return ImagePhash.GetCrossCorrelation(hash1, hash2);
     }
@@ -73,7 +73,7 @@ public sealed class Project : IDisposable
         DetectedLoads.Clear();
 
         Digest[] loadHashes = pickedLoadsIndeces
-            .Select(index => ImageProcessor.HashFrame(frames.ReadFrame(index), crop))
+            .Select(index => ImageProcessor.HashFrame(frames, index, crop))
             .ToArray();
 
         // Store the similarity of all frames and store this in another dictionary

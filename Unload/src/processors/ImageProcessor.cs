@@ -1,9 +1,10 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Media.Imaging;
@@ -14,28 +15,28 @@ namespace unload;
 
 public static class ImageProcessor
 {
-    // Crops a frame image and returns its Phash.
-    // Decodes through WicFrame rather than System.Drawing or WPF imaging, which both break under Wine when
-    // frames are hashed in parallel. WicFrame explains why.
-    public static Digest HashFrame(byte[] image, Rectangle cropPercentages)
-    {
-        Rectangle crop;
-        byte[] pixels;
-        using (WicFrame frame = new(image))
-        {
-            crop = GetCropPixels(frame.Width, frame.Height, cropPercentages);
-            pixels = frame.CopyPixelsBgr24(crop);
-        }
+    private static readonly Rectangle FullFrame = new(0, 0, 100, 100);
 
-        // Same luminance formula as Shipwreck.Phash.Bitmaps' ToLuminanceImage, so hashes match the
-        // System.Drawing pipeline this replaces. The pixels are in B, G, R order.
+    // Crops a frame and returns its Phash
+    public static Digest HashFrame(FrameStore frames, int frameNumber, Rectangle cropPercentages)
+    {
+        byte[] pixels = ReadFramePixels(frames, frameNumber, cropPercentages, out Rectangle crop);
         byte[] luminance = new byte[crop.Width * crop.Height];
-        for (int i = 0, p = 0; i < luminance.Length; i++, p += 3)
+        try
         {
-            int b = pixels[p];
-            int g = pixels[p + 1];
-            int r = pixels[p + 2];
-            luminance[i] = (byte)(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+            // Same luminance formula as Shipwreck.Phash.Bitmaps' ToLuminanceImage, so hashes match the
+            // System.Drawing pipeline this replaces. The pixels are in B, G, R order.
+            for (int i = 0, p = 0; i < luminance.Length; i++, p += 3)
+            {
+                int b = pixels[p];
+                int g = pixels[p + 1];
+                int r = pixels[p + 2];
+                luminance[i] = (byte)(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(pixels);
         }
 
         return ImagePhash.ComputeDigest(new ByteImage(crop.Width, crop.Height, luminance));
@@ -55,7 +56,7 @@ public static class ImageProcessor
         Parallel.For(startFrame, endFrame + 1, new ParallelOptions { CancellationToken = cts.Token }, i =>
         {
             // Crops and hashes the current frame, then stores the hash at the frame number
-            frameHashes[i] = HashFrame(frames.ReadFrame(i), cropPercentage);
+            frameHashes[i] = HashFrame(frames, i, cropPercentage);
 
             // Notifies the caller of its progress
             int done = Interlocked.Increment(ref doneFrames);
@@ -88,21 +89,57 @@ public static class ImageProcessor
         return new Dictionary<int, float[]>(frameSimilarities);
     }
 
-    // Decodes an encoded image and returns a cropped copy of it.
-    // The full size image is disposed right away: GDI+ keeps its pixels in unmanaged memory,
-    // which the garbage collector does not account for, so leaving it to the finalizer leaks.
-    public static Bitmap LoadCroppedImage(byte[] image, Rectangle cropPercentages)
+    // Returns a frame that can be displayed on the interface
+    public static BitmapSource LoadFrameImage(FrameStore frames, int frameNumber)
     {
-        // GDI+ reads from the stream for as long as the bitmap lives, the cropped copy doesn't need it
-        using MemoryStream stream = new(image);
-        using Bitmap source = new(stream);
-        return CropImage(source, cropPercentages);
+        return LoadCroppedFrameImage(frames, frameNumber, FullFrame);
     }
 
-    // Crops an image to by given percentages
-    public static Bitmap CropImage(Bitmap source, Rectangle cropPercentages)
+    // Returns a cropped frame that can be displayed on the interface
+    public static BitmapSource LoadCroppedFrameImage(FrameStore frames, int frameNumber, Rectangle cropPercentages)
     {
-        return source.Clone(GetCropPixels(source.Width, source.Height, cropPercentages), PixelFormat.Format24bppRgb);
+        byte[] pixels = ReadFramePixels(frames, frameNumber, cropPercentages, out Rectangle crop);
+        try
+        {
+            // Copies the pixels, so the buffer can go back to the pool right after
+            BitmapSource bitmap = BitmapSource.Create(crop.Width, crop.Height, 96, 96, System.Windows.Media.PixelFormats.Bgr24, null,
+                pixels, crop.Width * 3);
+            bitmap.Freeze();
+
+            return bitmap;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(pixels);
+        }
+    }
+
+    // Reads a frame and copies the cropped area as tightly packed BGR24 pixels, into a buffer rented from
+    // ArrayPool<byte>.Shared that the caller returns. A 1080p frame is about 6 MB, which would otherwise be a new large
+    // object heap allocation for every frame shown while scrubbing the timeline.
+    // Every frame read goes through here, so a damaged frame always surfaces as a CorruptFrameException.
+    // Decodes through WicFrame rather than System.Drawing or WPF imaging, WicFrame explains why.
+    private static byte[] ReadFramePixels(FrameStore frames, int frameNumber, Rectangle cropPercentages, out Rectangle crop)
+    {
+        // Outside the try, since failing to create the WIC factory has nothing to do with this frame
+        WicFrame.InitializeThreadFactory();
+
+        byte[]? pixels = null;
+        try
+        {
+            using WicFrame frame = new(frames.ReadFrame(frameNumber));
+            crop = GetCropPixels(frame.Width, frame.Height, cropPercentages);
+            pixels = ArrayPool<byte>.Shared.Rent(WicFrame.Bgr24Size(crop));
+            frame.CopyPixelsBgr24(crop, pixels);
+
+            return pixels;
+        }
+        // WicFrame reports every WIC failure as COMException, and a truncated frames file is an IOException
+        catch (Exception ex) when (ex is COMException or IOException)
+        {
+            if (pixels != null) ArrayPool<byte>.Shared.Return(pixels);
+            throw new CorruptFrameException(frameNumber, ex);
+        }
     }
 
     // Converts crop percentages to pixels, kept at least 1 pixel and inside the image
@@ -118,38 +155,5 @@ public static class ImageProcessor
             Width = Math.Clamp((int)Math.Round(cropPercentages.Width / 100d * width), 1, width - x),
             Height = Math.Clamp((int)Math.Round(cropPercentages.Height / 100d * height), 1, height - y)
         };
-    }
-
-    // Converts a bitmap to a bitmap image that can be displayed on the interface
-    public static BitmapImage BitmapToBitmapImage(this Bitmap bitmap)
-    {
-        using MemoryStream memory = new();
-
-        bitmap.Save(memory, ImageFormat.Png);
-        memory.Position = 0;
-
-        return LoadBitmapImage(memory);
-    }
-
-    // Decodes an encoded image into a bitmap image that can be displayed on the interface
-    public static BitmapImage LoadBitmapImage(byte[] image)
-    {
-        using MemoryStream memory = new(image);
-        return LoadBitmapImage(memory);
-    }
-
-    private static BitmapImage LoadBitmapImage(Stream stream)
-    {
-        BitmapImage bitmapImage = new();
-        bitmapImage.BeginInit();
-
-        // OnLoad decodes during EndInit, so the stream can be disposed right after
-        bitmapImage.StreamSource = stream;
-        bitmapImage.CacheOption = BitmapCacheOption.OnLoad;
-
-        bitmapImage.EndInit();
-        bitmapImage.Freeze();
-
-        return bitmapImage;
     }
 }
