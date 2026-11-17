@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
 
@@ -6,7 +6,7 @@ namespace unload;
 
 // A decoded image frame read through the Windows Imaging Component (WIC), called directly through COM.
 //
-// Frame hashing runs on many threads at once (see ImageProcessor.CropAndPhashFolder), and both higher level
+// Frame hashing runs on many threads at once (see ImageProcessor.CropAndPhashFrames), and both higher level
 // image APIs fail under Wine when used that way:
 //
 // - System.Drawing (GDI+): every Bitmap and Graphics makes Wine create a GDI memory DC, and Wine's X11 driver
@@ -29,9 +29,17 @@ namespace unload;
 // longer needed, on the thread that created it, so nothing waits on the finalizer. Hashes are identical to the
 // previous System.Drawing pipeline.
 //
+// Every frame shown on the interface also decodes through here (ImageProcessor.ReadFramePixels), so that a damaged
+// frame fails the same way everywhere. It also keeps System.Drawing out of display, which failed on Windows only:
+// System.Drawing requires the stream a Bitmap is decoded from to stay open for the bitmap's lifetime, and on Windows a
+// Bitmap cloned from it can still read through that stream. Cropping with Bitmap.Clone then disposing the stream made
+// saving the crop fail with "A generic error occurred in GDI+". Wine's GDI+ keeps each bitmap's pixels in its own
+// buffer, so this never shows there.
+//
 // The vtable slots below follow the interface declarations in wincodec.h, counting IUnknown's
 // QueryInterface (0), AddRef (1) and Release (2) first:
 // https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nn-wincodec-iwicimagingfactory
+// https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nn-wincodec-iwicstream
 // https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nn-wincodec-iwicbitmapdecoder
 // https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nn-wincodec-iwicbitmapsource
 // https://learn.microsoft.com/en-us/windows/win32/api/wincodec/nn-wincodec-iwicformatconverter
@@ -41,15 +49,19 @@ public sealed unsafe class WicFrame : IDisposable
     private static readonly Guid IID_IWICImagingFactory = new("ec5ec8a9-c395-4314-9c77-54d7a935ff70");
     private static readonly Guid GUID_WICPixelFormat24bppBGR = new("6fddc324-4e03-4bfe-b185-3d77768dc90c");
 
+    private const int WINCODEC_ERR_IMAGESIZEOUTOFRANGE = unchecked((int)0x88982F51);
+
     private const uint CLSCTX_INPROC_SERVER = 0x1;
-    private const uint GENERIC_READ = 0x80000000;
     private const int WICDecodeMetadataCacheOnDemand = 0;
     private const int WICBitmapDitherTypeNone = 0;
     private const int WICBitmapPaletteTypeCustom = 0;
 
     private const int Slot_Release = 2;
-    private const int Slot_Factory_CreateDecoderFromFilename = 3;
+    private const int Slot_Factory_CreateDecoderFromStream = 4;
     private const int Slot_Factory_CreateFormatConverter = 10;
+    private const int Slot_Factory_CreateStream = 14;
+    // IWICStream extends IStream, which extends ISequentialStream
+    private const int Slot_Stream_InitializeFromMemory = 16;
     private const int Slot_Decoder_GetFrame = 13;
     private const int Slot_Source_GetSize = 3;
     private const int Slot_Source_GetPixelFormat = 4;
@@ -61,6 +73,9 @@ public sealed unsafe class WicFrame : IDisposable
     [ThreadStatic]
     private static IntPtr threadFactory;
 
+    // The encoded image stays pinned while WIC reads it, which is as long as the decoder lives
+    private GCHandle pinnedImage;
+    private IntPtr stream;
     private IntPtr decoder;
     private IntPtr frame;
     private IntPtr converter;
@@ -70,19 +85,25 @@ public sealed unsafe class WicFrame : IDisposable
     public int Width { get; }
     public int Height { get; }
 
-    // Decodes the first frame of an image file
-    public WicFrame(string path)
+    // Decodes the first frame of an encoded image in memory
+    public WicFrame(byte[] image)
     {
         try
         {
+            pinnedImage = GCHandle.Alloc(image, GCHandleType.Pinned);
             IntPtr factory = GetThreadFactory();
-            fixed (char* fileName = path)
-            {
-                IntPtr newDecoder;
-                Check(((delegate* unmanaged[Stdcall]<IntPtr, char*, Guid*, uint, int, IntPtr*, int>)Slot(factory, Slot_Factory_CreateDecoderFromFilename))(
-                    factory, fileName, null, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &newDecoder));
-                decoder = newDecoder;
-            }
+
+            IntPtr newStream;
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, IntPtr*, int>)Slot(factory, Slot_Factory_CreateStream))(factory, &newStream));
+            stream = newStream;
+
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, byte*, uint, int>)Slot(stream, Slot_Stream_InitializeFromMemory))(
+                stream, (byte*)pinnedImage.AddrOfPinnedObject(), (uint)image.Length));
+
+            IntPtr newDecoder;
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, Guid*, int, IntPtr*, int>)Slot(factory, Slot_Factory_CreateDecoderFromStream))(
+                factory, stream, null, WICDecodeMetadataCacheOnDemand, &newDecoder));
+            decoder = newDecoder;
 
             IntPtr newFrame;
             Check(((delegate* unmanaged[Stdcall]<IntPtr, uint, IntPtr*, int>)Slot(decoder, Slot_Decoder_GetFrame))(decoder, 0, &newFrame));
@@ -90,6 +111,11 @@ public sealed unsafe class WicFrame : IDisposable
 
             uint width, height;
             Check(((delegate* unmanaged[Stdcall]<IntPtr, uint*, uint*, int>)Slot(frame, Slot_Source_GetSize))(frame, &width, &height));
+            // A damaged header can claim up to 65535x65535, more than one array can hold
+            if ((long)width * height * 3 > Array.MaxLength)
+            {
+                throw new COMException($"The image claims a size of {width}x{height}.", WINCODEC_ERR_IMAGESIZEOUTOFRANGE);
+            }
             Width = (int)width;
             Height = (int)height;
 
@@ -118,23 +144,29 @@ public sealed unsafe class WicFrame : IDisposable
         }
     }
 
-    // Copies an area of the frame as tightly packed BGR24 pixels (3 bytes per pixel, rows without padding)
-    public byte[] CopyPixelsBgr24(Rectangle area)
+    // Bytes needed to copy an area as tightly packed BGR24 pixels (3 bytes per pixel, rows without padding)
+    public static int Bgr24Size(Rectangle area) => checked(area.Width * 3 * area.Height);
+
+    // Copies an area of the frame as tightly packed BGR24 pixels into the start of `destination`, which can be larger
+    public void CopyPixelsBgr24(Rectangle area, byte[] destination)
     {
         ObjectDisposedException.ThrowIf(decoder == IntPtr.Zero, this);
 
-        int stride = area.Width * 3;
-        byte[] pixels = new byte[stride * area.Height];
+        int size = Bgr24Size(area);
+        ArgumentOutOfRangeException.ThrowIfLessThan(destination.Length, size);
+
         // WICRect has the same layout as 4 consecutive ints: X, Y, Width, Height
         int* rect = stackalloc int[4] { area.X, area.Y, area.Width, area.Height };
-        fixed (byte* buffer = pixels)
+        fixed (byte* buffer = destination)
         {
             Check(((delegate* unmanaged[Stdcall]<IntPtr, int*, uint, uint, byte*, int>)Slot(bgr24Source, Slot_Source_CopyPixels))(
-                bgr24Source, rect, (uint)stride, (uint)pixels.Length, buffer));
+                bgr24Source, rect, (uint)(area.Width * 3), (uint)size, buffer));
         }
-
-        return pixels;
     }
+
+    // Creates the calling thread's WIC factory now, if it doesn't exist yet. Failing to create it and failing to decode
+    // an image both throw COMException, so this lets callers tell WIC being unavailable apart from a damaged image.
+    public static void InitializeThreadFactory() => GetThreadFactory();
 
     public void Dispose()
     {
@@ -142,6 +174,12 @@ public sealed unsafe class WicFrame : IDisposable
         Release(ref converter);
         Release(ref frame);
         Release(ref decoder);
+        Release(ref stream);
+
+        if (pinnedImage.IsAllocated)
+        {
+            pinnedImage.Free();
+        }
     }
 
     private static IntPtr GetThreadFactory()
@@ -165,9 +203,12 @@ public sealed unsafe class WicFrame : IDisposable
         comObject = IntPtr.Zero;
     }
 
+    // Always throws COMException, so callers can catch every WIC failure as one type.
+    // Marshal.ThrowExceptionForHR maps some HRESULTs to other types, such as E_OUTOFMEMORY to OutOfMemoryException
+    // and E_INVALIDARG to ArgumentException.
     private static void Check(int hresult)
     {
-        if (hresult < 0) Marshal.ThrowExceptionForHR(hresult);
+        if (hresult < 0) throw new COMException(Marshal.GetPInvokeErrorMessage(hresult), hresult);
     }
 
     [DllImport("ole32.dll")]
