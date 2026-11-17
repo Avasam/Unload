@@ -21,6 +21,7 @@ public partial class LoadCheckWindow : Window, INotifyPropertyChanged
     private int endFrame;
 
     private bool returningToMainWindow;
+    private readonly CorruptFrameReporter corruptFrameReporter = new();
 
     private readonly int largeStepSize = 100;
 
@@ -125,11 +126,11 @@ public partial class LoadCheckWindow : Window, INotifyPropertyChanged
 
     private void ShowStartFrame(int frameIndex)
     {
-        imgStartFrame.Source = ImageProcessor.LoadBitmapImage(project.frames.ReadFrame(frameIndex));
+        imgStartFrame.Source = corruptFrameReporter.TryLoadFrameImage(project.frames, frameIndex);
 
         if (frameIndex > 1)
         {
-            imgStartFrameBefore.Source = ImageProcessor.LoadBitmapImage(project.frames.ReadFrame(frameIndex - 1));
+            imgStartFrameBefore.Source = corruptFrameReporter.TryLoadFrameImage(project.frames, frameIndex - 1);
         }
         else
         {
@@ -139,11 +140,11 @@ public partial class LoadCheckWindow : Window, INotifyPropertyChanged
 
     private void ShowEndFrame(int frameIndex)
     {
-        imgEndFrame.Source = ImageProcessor.LoadBitmapImage(project.frames.ReadFrame(frameIndex));
+        imgEndFrame.Source = corruptFrameReporter.TryLoadFrameImage(project.frames, frameIndex);
 
         if (frameIndex < project.totalFrames)
         {
-            imgEndFrameAfter.Source = ImageProcessor.LoadBitmapImage(project.frames.ReadFrame(frameIndex + 1));
+            imgEndFrameAfter.Source = corruptFrameReporter.TryLoadFrameImage(project.frames, frameIndex + 1);
         }
         else
         {

@@ -4,11 +4,13 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 using unload.Properties;
 using Point = System.Windows.Point;
@@ -29,6 +31,7 @@ public partial class MainWindow : Window
     private ProjectState projectState;
 
     private readonly List<int> pickedLoadingFrames = new();
+    private readonly CorruptFrameReporter corruptFrameReporter = new();
     private readonly List<int> sliderTicks = new();
 
     private readonly bool ready;
@@ -176,25 +179,28 @@ public partial class MainWindow : Window
         txtVideoFrame.Text = frameIndex.ToString();
 
         // Set the video frame and update the interface
-        imageVideo.Source = ImageProcessor.LoadBitmapImage(project.frames.ReadFrame(frameIndex));
+        imageVideo.Source = corruptFrameReporter.TryLoadFrameImage(project.frames, frameIndex);
 
         txtVideoFrame.Text = frameIndex.ToString();
     }
 
+    // Shows the selected picked load, cropped
     private void UpdatePickedLoadPreview()
     {
-        if (pickedLoadingFrames.Count >= 1)
-        {
-            // BitmapToBitmapImage makes a frozen copy, so the bitmap can be disposed right after
-            using Bitmap image = ImageProcessor.LoadCroppedImage(
-                project.frames.ReadFrame(pickedLoadingFrames[selectedPickedLoad]),
-                GetSliderCropRect());
-
-            imageLoadFrame.Source = ImageProcessor.BitmapToBitmapImage(image);
-        }
-        else
+        if (pickedLoadingFrames.Count == 0)
         {
             imageLoadFrame.Source = null;
+            return;
+        }
+
+        try
+        {
+            imageLoadFrame.Source = ImageProcessor.LoadCroppedFrameImage(project.frames, pickedLoadingFrames[selectedPickedLoad], GetSliderCropRect());
+        }
+        catch (CorruptFrameException ex)
+        {
+            imageLoadFrame.Source = null;
+            corruptFrameReporter.ShowOnce(ex);
         }
     }
 
@@ -462,10 +468,25 @@ public partial class MainWindow : Window
 
     private void btnAddLoadFrame_Click(object sender, RoutedEventArgs e)
     {
-        pickedLoadingFrames.Add(GetVideoFrame());
-        selectedPickedLoad++;
+        int frameNumber = GetVideoFrame();
 
-        UpdatePickedLoadPreview();
+        // A frame that can't be decoded can't be used as a reference load either, so it isn't added.
+        // Always reported, even when scrubbing already did, so the button doesn't seem to do nothing.
+        BitmapSource preview;
+        try
+        {
+            preview = ImageProcessor.LoadCroppedFrameImage(project.frames, frameNumber, GetSliderCropRect());
+        }
+        catch (CorruptFrameException ex)
+        {
+            CorruptFrameReporter.Show(ex);
+            return;
+        }
+
+        pickedLoadingFrames.Add(frameNumber);
+        selectedPickedLoad = pickedLoadingFrames.Count - 1;
+        imageLoadFrame.Source = preview;
+
         UpdateLoadPickerState();
     }
 
@@ -557,7 +578,16 @@ public partial class MainWindow : Window
     {
         int loadIndex = pickedLoadingFrames[selectedPickedLoad];
         int videoFrame = GetVideoFrame();
-        float similarity = project.GetSimilarity(loadIndex, videoFrame, GetSliderCropRect());
+        float similarity;
+        try
+        {
+            similarity = project.GetSimilarity(loadIndex, videoFrame, GetSliderCropRect());
+        }
+        catch (CorruptFrameException ex)
+        {
+            CorruptFrameReporter.Show(ex);
+            return;
+        }
 
         MessageBox.Show(similarity.ToString());
     }
@@ -607,6 +637,17 @@ public partial class MainWindow : Window
             {
                 // The progress window closes itself when cancelled
                 Dispatcher.BeginInvoke(() => gridContainer.IsEnabled = true);
+            }
+            // Parallel.For stops at the first corrupted frame and wraps it, along with any other frame that failed
+            // at the same time
+            catch (AggregateException ex) when (ex.InnerExceptions.All(inner => inner is CorruptFrameException))
+            {
+                Dispatcher.BeginInvoke(() =>
+                {
+                    progress.Close();
+                    gridContainer.IsEnabled = true;
+                    CorruptFrameReporter.Show((CorruptFrameException)ex.InnerExceptions[0]);
+                });
             }
             finally
             {
