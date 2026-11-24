@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Windows;
@@ -30,6 +31,7 @@ public partial class MainWindow : Window
     private ProjectState projectState;
 
     private readonly List<int> pickedLoadingFrames = new();
+    private readonly CorruptFrameReporter corruptFrameReporter = new();
     private readonly List<int> sliderTicks = new();
 
     private readonly bool ready;
@@ -38,6 +40,10 @@ public partial class MainWindow : Window
 
     private bool hasExported;
     private bool shouldOpenStart;
+
+    // Frame preparation reads the project's frames, so closing waits for it before disposing them
+    private Thread? prepareFramesThread;
+    private CancellationTokenSource? prepareFramesCts;
 
     private bool drawingLoadCrop;
     private Point loadCropStartPoint;
@@ -173,24 +179,28 @@ public partial class MainWindow : Window
         txtVideoFrame.Text = frameIndex.ToString();
 
         // Set the video frame and update the interface
-        Uri image = new(Path.Join(project.framesDirectory, $"{frameIndex}.jpg"));
-        imageVideo.Source = new BitmapImage(image);
+        imageVideo.Source = corruptFrameReporter.TryLoadFrameImage(project.frames, frameIndex);
 
         txtVideoFrame.Text = frameIndex.ToString();
     }
 
+    // Shows the selected picked load, cropped
     private void UpdatePickedLoadPreview()
     {
-        if (pickedLoadingFrames.Count >= 1)
-        {
-            using Bitmap image = new(Path.Join(project.framesDirectory, $"{pickedLoadingFrames[selectedPickedLoad]}.jpg"));
-            using Bitmap croppedImage = ImageProcessor.CropImage(image, GetSliderCropRect());
-
-            imageLoadFrame.Source = ImageProcessor.BitmapToBitmapImage(croppedImage);
-        }
-        else
+        if (pickedLoadingFrames.Count == 0)
         {
             imageLoadFrame.Source = null;
+            return;
+        }
+
+        try
+        {
+            imageLoadFrame.Source = ImageProcessor.LoadCroppedFrameImage(project.frames, pickedLoadingFrames[selectedPickedLoad], GetSliderCropRect());
+        }
+        catch (CorruptFrameException ex)
+        {
+            imageLoadFrame.Source = null;
+            corruptFrameReporter.ShowOnce(ex);
         }
     }
 
@@ -458,10 +468,25 @@ public partial class MainWindow : Window
 
     private void btnAddLoadFrame_Click(object sender, RoutedEventArgs e)
     {
-        pickedLoadingFrames.Add(GetVideoFrame());
-        selectedPickedLoad++;
+        int frameNumber = GetVideoFrame();
 
-        UpdatePickedLoadPreview();
+        // A frame that can't be decoded can't be used as a reference load either, so it isn't added.
+        // Always reported, even when scrubbing already did, so the button doesn't seem to do nothing.
+        BitmapSource preview;
+        try
+        {
+            preview = ImageProcessor.LoadCroppedFrameImage(project.frames, frameNumber, GetSliderCropRect());
+        }
+        catch (CorruptFrameException ex)
+        {
+            CorruptFrameReporter.Show(ex);
+            return;
+        }
+
+        pickedLoadingFrames.Add(frameNumber);
+        selectedPickedLoad = pickedLoadingFrames.Count - 1;
+        imageLoadFrame.Source = preview;
+
         UpdateLoadPickerState();
     }
 
@@ -553,7 +578,16 @@ public partial class MainWindow : Window
     {
         int loadIndex = pickedLoadingFrames[selectedPickedLoad];
         int videoFrame = GetVideoFrame();
-        float similarity = project.GetSimilarity(loadIndex, videoFrame, GetSliderCropRect());
+        float similarity;
+        try
+        {
+            similarity = project.GetSimilarity(loadIndex, videoFrame, GetSliderCropRect());
+        }
+        catch (CorruptFrameException ex)
+        {
+            CorruptFrameReporter.Show(ex);
+            return;
+        }
 
         MessageBox.Show(similarity.ToString());
     }
@@ -580,9 +614,10 @@ public partial class MainWindow : Window
 
         void onProgress(double percentage) => progress.percentage = percentage;
 
+        // BeginInvoke, as closing the window blocks the UI thread until this thread ends
         void onFinished()
         {
-            Dispatcher.Invoke(() =>
+            Dispatcher.BeginInvoke(() =>
             {
                 progress.Close();
                 gridContainer.IsEnabled = true;
@@ -593,9 +628,40 @@ public partial class MainWindow : Window
 
         Thread thread = new(() =>
         {
-            project.PrepareFrames(startFrame, endFrame, crop,
-                progress.cts, onProgress, onFinished);
+            try
+            {
+                project.PrepareFrames(startFrame, endFrame, crop,
+                    progress.cts, onProgress, onFinished);
+            }
+            catch (OperationCanceledException)
+            {
+                // The progress window closes itself when cancelled
+                Dispatcher.BeginInvoke(() => gridContainer.IsEnabled = true);
+            }
+            // Parallel.For stops at the first corrupted frame and wraps it, along with any other frame that failed
+            // at the same time
+            catch (AggregateException ex) when (ex.InnerExceptions.All(inner => inner is CorruptFrameException))
+            {
+                Dispatcher.BeginInvoke(() =>
+                {
+                    progress.Close();
+                    gridContainer.IsEnabled = true;
+                    CorruptFrameReporter.Show((CorruptFrameException)ex.InnerExceptions[0]);
+                });
+            }
+            finally
+            {
+                // On the UI thread, so OnClosed can't cancel it while it is being disposed
+                Dispatcher.BeginInvoke(() =>
+                {
+                    if (prepareFramesCts == progress.cts) prepareFramesCts = null;
+                    progress.cts.Dispose();
+                });
+            }
         });
+
+        prepareFramesThread = thread;
+        prepareFramesCts = progress.cts;
 
         thread.IsBackground = true;
         thread.Start();
@@ -783,5 +849,16 @@ public partial class MainWindow : Window
             StartWindow startWindow = new();
             startWindow.Show();
         }
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        prepareFramesCts?.Cancel();
+        prepareFramesThread?.Join();
+        // Still set when the thread's dispose hasn't run yet, disposing twice is harmless
+        prepareFramesCts?.Dispose();
+        project.Dispose();
+
+        base.OnClosed(e);
     }
 }
